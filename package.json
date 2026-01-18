@@ -1,0 +1,17 @@
+{
+  "name": "qr-backend",
+  "version": "1.0.0",
+  "description": "QR Restaurant Menu System Backend",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "nodemon backend/server.js",
+    "install-backend": "cd backend && npm install"
+  },
+  "keywords": ["qr", "menu", "restaurant"],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": "18.x"
+  }
+}
