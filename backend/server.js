@@ -118,58 +118,6 @@ app.post('/api/users/login', async (req, res) => {
   }
 });
 
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-app.put('/api/users/:id', async (req, res) => {
-  try {
-    const { restaurantName, tables, profilePicture, bannerImage } = req.body;
-    
-    // Validate input
-    if (!restaurantName || !restaurantName.trim()) {
-      return res.status(400).json({ message: 'Restaurant name is required' });
-    }
-    
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { restaurantName, tables, profilePicture, bannerImage },
-      { new: true }
-    ).select('-password');
-    
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    console.error('Update user error:', error);
-    res.status(500).json({ message: error.message || 'Failed to update profile' });
-  }
-});
-
-app.post('/api/users/:id/change-password', async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    const valid = await bcrypt.compare(currentPassword, user.password);
-    if (!valid) return res.status(400).json({ message: 'Current password is incorrect' });
-    
-    const hashed = await bcrypt.hash(newPassword, 10);
-    user.password = hashed;
-    await user.save();
-    
-    res.json({ message: 'Password changed successfully' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
 app.post('/api/users/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -241,6 +189,59 @@ app.post('/api/users/reset-password', async (req, res) => {
   } catch (error) {
     console.error('Reset password error:', error);
     res.status(500).json({ message: 'Failed to reset password' });
+  }
+});
+
+// User Routes with ID parameter (must come AFTER specific routes)
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const { restaurantName, tables, profilePicture, bannerImage } = req.body;
+    
+    // Validate input
+    if (!restaurantName || !restaurantName.trim()) {
+      return res.status(400).json({ message: 'Restaurant name is required' });
+    }
+    
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { restaurantName, tables, profilePicture, bannerImage },
+      { new: true }
+    ).select('-password');
+    
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ message: error.message || 'Failed to update profile' });
+  }
+});
+
+app.post('/api/users/:id/change-password', async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) return res.status(400).json({ message: 'Current password is incorrect' });
+    
+    const hashed = await bcrypt.hash(newPassword, 10);
+    user.password = hashed;
+    await user.save();
+    
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 });
 
