@@ -17,3 +17,11 @@ services:
         sync: false
       - key: NODE_ENV
         value: production
+
+  - type: static
+    name: qr-menu-frontend
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://qr-backend-59mq.onrender.com
