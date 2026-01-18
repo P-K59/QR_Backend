@@ -5,8 +5,7 @@
   "main": "backend/server.js",
   "scripts": {
     "start": "node backend/server.js",
-    "dev": "nodemon backend/server.js",
-    "postinstall": "cd backend && npm install"
+    "dev": "nodemon backend/server.js"
   },
   "keywords": ["qr", "menu", "restaurant"],
   "author": "",

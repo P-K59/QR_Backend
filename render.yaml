@@ -2,7 +2,7 @@ services:
   - type: web
     name: qr-backend
     runtime: node
-    buildCommand: npm install && cd backend && npm install
+    buildCommand: npm install --prefix backend
     startCommand: node backend/server.js
     envVars:
       - key: MONGODB_URI
