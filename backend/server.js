@@ -19,7 +19,8 @@ const io = socketIo(server, {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/qr-menu')
@@ -128,15 +129,23 @@ app.get('/api/users/:id', async (req, res) => {
 app.put('/api/users/:id', async (req, res) => {
   try {
     const { restaurantName, tables, profilePicture, bannerImage } = req.body;
+    
+    // Validate input
+    if (!restaurantName || !restaurantName.trim()) {
+      return res.status(400).json({ message: 'Restaurant name is required' });
+    }
+    
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { restaurantName, tables, profilePicture, bannerImage },
       { new: true }
     ).select('-password');
+    
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Update user error:', error);
+    res.status(500).json({ message: error.message || 'Failed to update profile' });
   }
 });
 
@@ -266,7 +275,14 @@ app.post('/api/menu', async (req, res) => {
 
 app.put('/api/menu/:id', async (req, res) => {
   try {
-    const updated = await MenuItem.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    // Extract only the fields that should be updatable
+    const { name, description, price, category, image, available } = req.body;
+    const updateData = { name, description, price, category, image, available };
+    
+    // Remove undefined fields
+    Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+    
+    const updated = await MenuItem.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!updated) return res.status(404).json({ message: 'Item not found' });
     res.json(updated);
   } catch (err) {
@@ -394,6 +410,17 @@ io.on('connection', (socket) => {
     if (room) {
       socket.join(room);
       console.log(`Socket ${socket.id} joined room ${room}`);
+    }
+  });
+
+  socket.on('menuUpdated', (updatedItem) => {
+    // Broadcast to all clients in the restaurant's room
+    const restaurantId = updatedItem.owner;
+    if (restaurantId) {
+      io.to(restaurantId.toString()).emit('menuUpdated', updatedItem);
+      console.log(`Menu updated for restaurant ${restaurantId}`);
+    } else {
+      io.emit('menuUpdated', updatedItem);
     }
   });
 
