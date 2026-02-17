@@ -7,20 +7,57 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const http = require('http');
 const socketIo = require('socket.io');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS allowed origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://qrmenusystem.netlify.app',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 const io = socketIo(server, {
   cors: {
-    origin: '*',
+    origin: allowedOrigins,
     methods: ['GET', 'POST']
   }
 });
 
 // Middleware
-app.use(cors());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+app.use(cors({
+  origin: allowedOrigins
+}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Rate Limiting
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // Limit each IP to 20 requests per windowMs
+  message: { message: 'Too many attempts, please try again later' }
+});
+
+// Authentication Middleware
+const verifyToken = (req, res, next) => {
+  const token = req.headers['authorization']?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Access denied. No token provided.' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+    req.user = decoded;
+    next();
+  } catch (ex) {
+    res.status(400).json({ message: 'Invalid token.' });
+  }
+};
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/qr-menu')
@@ -52,6 +89,7 @@ const MenuItem = mongoose.model('MenuItem', menuItemSchema);
 // User Schema
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
+  phoneNumber: { type: String, unique: true, sparse: true },
   password: { type: String, required: true },
   restaurantName: String,
   tables: [Number],
@@ -81,16 +119,29 @@ const orderSchema = new mongoose.Schema({
 const Order = mongoose.model('Order', orderSchema);
 
 // User Routes
-app.post('/api/users/register', async (req, res) => {
+app.post('/api/users/register', authLimiter, async (req, res) => {
   try {
-    const { email, password, restaurantName, tables } = req.body;
+    const { email, phoneNumber, password, restaurantName, tables } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
 
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(400).json({ message: 'User already exists' });
+    // Check if email already exists
+    const emailExists = await User.findOne({ email });
+    if (emailExists) return res.status(400).json({ message: 'Email already registered' });
+
+    // Check if phone number already exists
+    if (phoneNumber) {
+      const phoneExists = await User.findOne({ phoneNumber });
+      if (phoneExists) return res.status(400).json({ message: 'Phone number already registered' });
+    }
 
     const hashed = await bcrypt.hash(password, 10);
-    const user = new User({ email, password: hashed, restaurantName, tables });
+    const user = new User({
+      email,
+      phoneNumber,
+      password: hashed,
+      restaurantName,
+      tables: (tables && tables.length > 0) ? tables : [1]
+    });
     await user.save();
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' });
     res.json({ message: 'Registered', token, userId: user._id });
@@ -100,10 +151,15 @@ app.post('/api/users/register', async (req, res) => {
   }
 });
 
-app.post('/api/users/login', async (req, res) => {
+app.post('/api/users/login', authLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
+    const { identifier, password } = req.body;
+    const user = await User.findOne({
+      $or: [
+        { email: identifier },
+        { phoneNumber: identifier }
+      ]
+    });
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(400).json({ message: 'Invalid credentials' });
@@ -116,59 +172,7 @@ app.post('/api/users/login', async (req, res) => {
   }
 });
 
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-app.put('/api/users/:id', async (req, res) => {
-  try {
-    const { restaurantName, tables, profilePicture, bannerImage } = req.body;
-    
-    // Validate input
-    if (!restaurantName || !restaurantName.trim()) {
-      return res.status(400).json({ message: 'Restaurant name is required' });
-    }
-    
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { restaurantName, tables, profilePicture, bannerImage },
-      { new: true }
-    ).select('-password');
-    
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json(user);
-  } catch (error) {
-    console.error('Update user error:', error);
-    res.status(500).json({ message: error.message || 'Failed to update profile' });
-  }
-});
-
-app.post('/api/users/:id/change-password', async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    const valid = await bcrypt.compare(currentPassword, user.password);
-    if (!valid) return res.status(400).json({ message: 'Current password is incorrect' });
-    
-    const hashed = await bcrypt.hash(newPassword, 10);
-    user.password = hashed;
-    await user.save();
-    
-    res.json({ message: 'Password changed successfully' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-app.post('/api/users/forgot-password', async (req, res) => {
+app.post('/api/users/forgot-password', authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
@@ -209,7 +213,7 @@ app.post('/api/users/forgot-password', async (req, res) => {
   }
 });
 
-app.post('/api/users/reset-password', async (req, res) => {
+app.post('/api/users/reset-password', authLimiter, async (req, res) => {
   try {
     const { email, token, newPassword } = req.body;
     if (!email || !token || !newPassword) {
@@ -242,6 +246,80 @@ app.post('/api/users/reset-password', async (req, res) => {
   }
 });
 
+// Public User Routes (No token needed for basic info)
+app.get('/api/users/:id/public', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id)
+      .select('restaurantName profilePicture bannerImage tables');
+    if (!user) return res.status(404).json({ message: 'Restaurant not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// User Routes with ID parameter (must come AFTER specific routes)
+app.get('/api/users/:id', verifyToken, async (req, res) => {
+  try {
+    if (req.user.userId !== req.params.id) {
+      return res.status(403).json({ message: 'Not authorized to view this profile' });
+    }
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.put('/api/users/:id', verifyToken, async (req, res) => {
+  try {
+    if (req.user.userId !== req.params.id) {
+      return res.status(403).json({ message: 'Not authorized to update this profile' });
+    }
+    const { restaurantName, tables, profilePicture, bannerImage } = req.body;
+
+    // Validate input
+    if (!restaurantName || !restaurantName.trim()) {
+      return res.status(400).json({ message: 'Restaurant name is required' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { restaurantName, tables, profilePicture, bannerImage },
+      { new: true }
+    ).select('-password');
+
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ message: error.message || 'Failed to update profile' });
+  }
+});
+
+app.post('/api/users/:id/change-password', verifyToken, async (req, res) => {
+  try {
+    if (req.user.userId !== req.params.id) {
+      return res.status(403).json({ message: 'Not authorized to change password for this account' });
+    }
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const valid = await bcrypt.compare(currentPassword, user.password);
+    if (!valid) return res.status(400).json({ message: 'Current password is incorrect' });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    user.password = hashed;
+    await user.save();
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Menu Routes
 app.get('/api/menu', async (req, res) => {
   try {
@@ -261,10 +339,17 @@ app.get('/api/menu/:userId', async (req, res) => {
   }
 });
 
-app.post('/api/menu', async (req, res) => {
+app.post('/api/menu', verifyToken, async (req, res) => {
   try {
-    const { name, description, price, category, image, owner } = req.body;
-    const item = new MenuItem({ name, description, price, category, image, owner: owner || null });
+    const { name, description, price, category, image } = req.body;
+    const item = new MenuItem({
+      name,
+      description,
+      price,
+      category,
+      image,
+      owner: req.user.userId
+    });
     const saved = await item.save();
     res.json(saved);
   } catch (err) {
@@ -273,17 +358,22 @@ app.post('/api/menu', async (req, res) => {
   }
 });
 
-app.put('/api/menu/:id', async (req, res) => {
+app.put('/api/menu/:id', verifyToken, async (req, res) => {
   try {
-    // Extract only the fields that should be updatable
     const { name, description, price, category, image, available } = req.body;
     const updateData = { name, description, price, category, image, available };
-    
+
+    // Check ownership
+    const item = await MenuItem.findById(req.params.id);
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    if (item.owner?.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Not authorized to update this item' });
+    }
+
     // Remove undefined fields
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
-    
+
     const updated = await MenuItem.findByIdAndUpdate(req.params.id, updateData, { new: true });
-    if (!updated) return res.status(404).json({ message: 'Item not found' });
     res.json(updated);
   } catch (err) {
     console.error('Update menu error:', err);
@@ -291,10 +381,15 @@ app.put('/api/menu/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/menu/:id', async (req, res) => {
+app.delete('/api/menu/:id', verifyToken, async (req, res) => {
   try {
-    const removed = await MenuItem.findByIdAndDelete(req.params.id);
-    if (!removed) return res.status(404).json({ message: 'Item not found' });
+    const item = await MenuItem.findById(req.params.id);
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    if (item.owner?.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Not authorized to delete this item' });
+    }
+
+    await MenuItem.findByIdAndDelete(req.params.id);
     res.json({ message: 'Deleted' });
   } catch (err) {
     console.error('Delete menu error:', err);
@@ -340,33 +435,34 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-app.get('/api/orders', async (req, res) => {
+app.get('/api/orders', verifyToken, async (req, res) => {
   try {
-    // Get restaurantId from query params
-    const restaurantId = req.query.restaurantId;
-    
-    if (!restaurantId) {
-      return res.status(400).json({ message: 'restaurantId is required' });
-    }
-    
-    // Filter orders by restaurantId matching the logged-in user
-    const orders = await Order.find({ restaurantId: restaurantId })
+    // Filter orders by restaurantId matching the logged-in user from the token
+    const orders = await Order.find({ restaurantId: req.user.userId })
       .populate('items.menuItem')
       .sort({ createdAt: -1 });
-    
+
     res.json(orders);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-app.put('/api/orders/:id', async (req, res) => {
+app.put('/api/orders/:id', verifyToken, async (req, res) => {
   try {
     const { status } = req.body;
-    const validStatuses = ['pending', 'process', 'complete', 'cancelled'];
-    
+    const validStatuses = ['pending', 'process', 'ready', 'billed', 'complete', 'cancelled'];
+
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    // Check ownership of the order
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    if (order.restaurantId?.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Not authorized to update this order' });
     }
 
     const updatedOrder = await Order.findByIdAndUpdate(
@@ -374,10 +470,6 @@ app.put('/api/orders/:id', async (req, res) => {
       { status },
       { new: true }
     ).populate('items.menuItem');
-
-    if (!updatedOrder) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
 
     // Emit update via socket
     try {
@@ -401,6 +493,7 @@ app.put('/api/orders/:id', async (req, res) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  console.log(`CORS enabled for: http://localhost:3000, http://localhost:3001, ${process.env.FRONTEND_URL || 'not set'}`);
 });
 
 io.on('connection', (socket) => {
