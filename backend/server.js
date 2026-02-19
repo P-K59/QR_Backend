@@ -119,6 +119,16 @@ const menuItemSchema = new mongoose.Schema({
 
 const MenuItem = mongoose.model('MenuItem', menuItemSchema);
 
+const serviceRequestSchema = new mongoose.Schema({
+  restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  type: String,
+  tableNumber: String,
+  customerName: String,
+  timestamp: { type: Date, default: Date.now },
+  status: { type: String, default: 'pending' } // pending, handled
+});
+const ServiceRequest = mongoose.model('ServiceRequest', serviceRequestSchema);
+
 // User Schema
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
@@ -128,6 +138,9 @@ const userSchema = new mongoose.Schema({
   tables: [Number],
   profilePicture: String,
   bannerImage: String,
+  qrColor: { type: String, default: '#000000' },
+  qrLogo: String,
+  tableStats: { type: Map, of: Number, default: {} }, // tableNumber -> scanCount
   resetToken: String,
   resetTokenExpiry: Date
 });
@@ -139,7 +152,8 @@ const orderSchema = new mongoose.Schema({
     menuItem: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem', required: false },
     menuItemName: String,
     price: Number,
-    quantity: { type: Number, default: 1 }
+    quantity: { type: Number, default: 1 },
+    notes: String
   }],
   tableNumber: Number,
   customerName: String,
@@ -291,6 +305,24 @@ app.get('/api/users/:id/public', async (req, res) => {
   }
 });
 
+// Scan Analytics Route (Increment count)
+app.post('/api/users/:id/scan/:tableNumber', async (req, res) => {
+  try {
+    const { id, tableNumber } = req.params;
+
+    // Atomically increment the scan count for the specific table
+    const update = { $inc: { [`tableStats.${tableNumber}`]: 1 } };
+    const user = await User.findByIdAndUpdate(id, update, { new: true });
+
+    if (!user) return res.status(404).json({ message: 'Restaurant not found' });
+
+    res.json({ message: 'Scan recorded', stats: user.tableStats });
+  } catch (error) {
+    console.error('Scan tracking error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 // User Routes with ID parameter (must come AFTER specific routes)
 app.get('/api/users/:id', verifyToken, async (req, res) => {
   try {
@@ -310,16 +342,20 @@ app.put('/api/users/:id', verifyToken, async (req, res) => {
     if (req.user.userId !== req.params.id) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
-    const { restaurantName, tables, profilePicture, bannerImage } = req.body;
+    const { restaurantName, tables, profilePicture, bannerImage, qrColor, qrLogo } = req.body;
 
     // Validate input
     if (!restaurantName || !restaurantName.trim()) {
       return res.status(400).json({ message: 'Restaurant name is required' });
     }
 
+    const updateData = { restaurantName, tables, profilePicture, bannerImage, qrColor, qrLogo };
+    // Remove undefined fields to avoid overwriting existing data with null
+    Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { restaurantName, tables, profilePicture, bannerImage },
+      updateData,
       { new: true }
     ).select('-password');
 
@@ -438,7 +474,8 @@ app.post('/api/orders', async (req, res) => {
       menuItem: i.menuItem || null,
       menuItemName: i.menuItemName || i.name || 'Unknown Item',
       price: i.price !== undefined ? i.price : 0,
-      quantity: i.quantity || 1
+      quantity: i.quantity || 1,
+      notes: i.notes || ''
     }));
 
     const order = new Order({
@@ -476,6 +513,16 @@ app.get('/api/orders', verifyToken, async (req, res) => {
       .sort({ createdAt: -1 });
 
     res.json(orders);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get('/api/orders/status/:id', async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+    res.json(order);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -522,6 +569,28 @@ app.put('/api/orders/:id', verifyToken, async (req, res) => {
   }
 });
 
+// Service Requests API
+app.get('/api/service-requests/:restaurantId', async (req, res) => {
+  try {
+    const requests = await ServiceRequest.find({
+      restaurantId: req.params.restaurantId,
+      status: 'pending'
+    }).sort({ timestamp: -1 });
+    res.json(requests);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete('/api/service-requests/:id', async (req, res) => {
+  try {
+    await ServiceRequest.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Request removed' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Server & Socket.io
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
@@ -547,6 +616,25 @@ io.on('connection', (socket) => {
       console.log(`Menu updated for restaurant ${restaurantId}`);
     } else {
       io.emit('menuUpdated', updatedItem);
+    }
+  });
+
+  socket.on('serviceRequest', async (data) => {
+    const { restaurantId, type, tableNumber, customerName } = data;
+    if (restaurantId) {
+      try {
+        const newReq = new ServiceRequest({
+          restaurantId,
+          type,
+          tableNumber,
+          customerName: customerName || 'Guest'
+        });
+        await newReq.save();
+        io.to(restaurantId.toString()).emit('serviceRequest', { ...data, _id: newReq._id });
+        console.log(`Service request (${type}) saved and broadcast for restaurant ${restaurantId}`);
+      } catch (err) {
+        console.error('Error saving service request:', err);
+      }
     }
   });
 
